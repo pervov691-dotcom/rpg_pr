@@ -24,6 +24,7 @@ BASE_XP_PER_LEVEL = 100
 LEVEL_MULTIPLIER = 1.12
 DAILY_ATTACK_LIMIT = 25
 PARTY_TIME_HOURS = 3
+ZATOCHKA_COOLDOWN_SECONDS = 180  # 3 минуты между ударами заточкой
 
 # БАЗОВЫЙ УРОН ЗАТОЧКИ (1 уровень)
 BASE_SHANK_DAMAGE = 15
@@ -36,9 +37,9 @@ BOSSES = {
 }
 
 ATTACKS = {
-    "zatochka": {"name": "🔪 Заточка", "damage_mult": 1.0, "cost": 0},
-    "butylka": {"name": "🍾 Бутылка", "damage_mult": 1.5, "cost": 20},
-    "klyuch": {"name": "🔧 Гаечный ключ", "damage_mult": 2.0, "cost": 50}
+    "zatochka": {"name": "🔪 Заточка", "damage_mult": 1.0, "cost": 0, "cooldown": ZATOCHKA_COOLDOWN_SECONDS},
+    "butylka": {"name": "🍾 Бутылка", "damage_mult": 1.5, "cost": 20, "cooldown": 0},
+    "klyuch": {"name": "🔧 Гаечный ключ", "damage_mult": 2.0, "cost": 50, "cooldown": 0}
 }
 
 EARN_METHODS = {
@@ -47,9 +48,71 @@ EARN_METHODS = {
     "fight": {"name": "👊 Драка", "min": 15, "max": 30, "cooldown": 900}
 }
 
-# ===== ФУНКЦИИ =====
+# ===== ФУНКЦИИ СТАТИСТИКИ =====
+def get_moscow_date():
+    return (datetime.now() + timedelta(hours=3)).strftime("%Y-%m-%d")
+
+def update_daily_stats(user_id: int, is_new: bool = False):
+    """Обновляет ежедневную статистику"""
+    try:
+        today = get_moscow_date()
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT new_players, active_players FROM daily_stats WHERE date = ?", (today,))
+        result = cursor.fetchone()
+        
+        if result:
+            new_players, active_players = result
+        else:
+            new_players, active_players = 0, 0
+            cursor.execute("INSERT INTO daily_stats (date, new_players, active_players) VALUES (?, 0, 0)", (today,))
+        
+        if is_new:
+            new_players += 1
+        
+        # Проверяем, был ли игрок активен сегодня
+        cursor.execute("SELECT last_active FROM zeks WHERE user_id = ?", (user_id,))
+        last = cursor.fetchone()
+        if not last or not last[0] or last[0].split("T")[0] != today:
+            active_players += 1
+        
+        cursor.execute("UPDATE daily_stats SET new_players = ?, active_players = ? WHERE date = ?", 
+                       (new_players, active_players, today))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Ошибка обновления статистики: {e}")
+
+def get_daily_stats():
+    """Получает статистику за сегодня"""
+    try:
+        today = get_moscow_date()
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT new_players, active_players FROM daily_stats WHERE date = ?", (today,))
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result:
+            return {"new": result[0], "active": result[1]}
+        return {"new": 0, "active": 0}
+    except:
+        return {"new": 0, "active": 0}
+
+def reset_daily_stats():
+    """Сбрасывает статистику (вызывается в 00:01 МСК)"""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM daily_stats WHERE date < ?", (get_moscow_date(),))
+        conn.commit()
+        conn.close()
+    except:
+        pass
+
+# ===== ОСТАЛЬНЫЕ ФУНКЦИИ =====
 def get_zatochka_damage(level: int) -> int:
-    """Урон заточки: базовый 15 + 5 за каждый уровень"""
     return BASE_SHANK_DAMAGE + (level - 1) * 5
 
 def get_zatochka_cost(level: int) -> int:
@@ -57,7 +120,6 @@ def get_zatochka_cost(level: int) -> int:
 
 def get_boss_stats(boss_id: int, respect: int) -> dict:
     boss = BOSSES[boss_id]
-    # Множитель сложности от авторитета игрока
     mult = 1 + (respect - boss["min_respect"]) * 0.05 if respect >= boss["min_respect"] else 0.5
     mult = max(0.5, min(mult, 2.0))
     return {
@@ -71,20 +133,45 @@ def get_boss_stats(boss_id: int, respect: int) -> dict:
     }
 
 def get_attack_damage(attack_type: str, zatochka_level: int, boss_id: int = None) -> int:
-    """Расчет урона с учетом типа атаки и уровня заточки"""
     base_damage = get_zatochka_damage(zatochka_level)
     mult = ATTACKS[attack_type]["damage_mult"]
     damage = int(base_damage * mult)
     
-    # Бонусы против определенных боссов
     if boss_id == 2 and attack_type == "butylka":
-        damage = int(damage * 1.3)  # Бутылка эффективна против Баклана
+        damage = int(damage * 1.3)
     elif boss_id == 3 and attack_type == "klyuch":
-        damage = int(damage * 1.2)  # Ключ эффективен против Вора
+        damage = int(damage * 1.2)
     
     return max(1, damage)
 
-# ===== ОСТАЛЬНЫЕ ФУНКЦИИ (сокращены для экономии места, но основные остаются) =====
+def get_attack_cooldown(user_id: int, boss_id: int) -> Tuple[bool, int]:
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT last_attack FROM attack_cooldown WHERE user_id = ? AND boss_id = ?", (user_id, boss_id))
+    result = cursor.fetchone()
+    conn.close()
+    
+    if not result or not result[0]:
+        return True, 0
+    
+    last_attack = datetime.fromisoformat(result[0])
+    cooldown_seconds = ZATOCHKA_COOLDOWN_SECONDS
+    time_left = cooldown_seconds - (datetime.now() - last_attack).total_seconds()
+    
+    if time_left <= 0:
+        return True, 0
+    return False, int(time_left)
+
+def set_attack_cooldown(user_id: int, boss_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT OR REPLACE INTO attack_cooldown (user_id, boss_id, last_attack)
+        VALUES (?, ?, ?)
+    ''', (user_id, boss_id, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
 def get_xp_for_respect(respect: int) -> int:
     return int(BASE_XP_PER_LEVEL * (LEVEL_MULTIPLIER ** (respect - 1)))
 
@@ -118,9 +205,11 @@ def add_xp(user_id: int, xp_amount: int, name: str = None) -> Tuple[int, int, bo
         cursor.execute('INSERT INTO zeks (user_id, name, last_active, created_at) VALUES (?, ?, ?, ?)',
                       (user_id, name, datetime.now().isoformat(), datetime.now().isoformat()))
         conn.commit()
+        update_daily_stats(user_id, True)
         respect, current_xp, total_xp = 1, 0, 0
     else:
         respect, current_xp, total_xp = result
+        update_daily_stats(user_id, False)
     total_xp += xp_amount
     new_respect, new_current_xp = get_respect_from_xp(total_xp)
     levels_gained = new_respect - respect
@@ -593,24 +682,38 @@ def get_bosses_keyboard(user_id: int):
     kb.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")])
     return InlineKeyboardMarkup(kb)
 
-def get_party_action_keyboard(party_id: int, boss_id: int):
-    kb = [
-        [InlineKeyboardButton("🔪 Заточка (0🍺)", callback_data=f"party_attack_{party_id}_{boss_id}_zatochka")],
-        [InlineKeyboardButton("🍾 Бутылка (20🍺)", callback_data=f"party_attack_{party_id}_{boss_id}_butylka")],
-        [InlineKeyboardButton("🔧 Гаечный ключ (50🍺)", callback_data=f"party_attack_{party_id}_{boss_id}_klyuch")],
-        [InlineKeyboardButton("📎 Пригласить друзей", callback_data=f"party_invite_{party_id}_{boss_id}")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="bosses_menu")]
-    ]
+def get_party_action_keyboard(party_id: int, boss_id: int, user_id: int):
+    can_attack, cooldown = get_attack_cooldown(user_id, boss_id)
+    kb = []
+    
+    if can_attack:
+        kb.append([InlineKeyboardButton("🔪 Заточка (0🍺)", callback_data=f"party_attack_{party_id}_{boss_id}_zatochka")])
+    else:
+        minutes = cooldown // 60
+        seconds = cooldown % 60
+        kb.append([InlineKeyboardButton(f"⏳ Заточка: {minutes}м {seconds}с", callback_data="noop")])
+    
+    kb.append([InlineKeyboardButton("🍾 Бутылка (20🍺)", callback_data=f"party_attack_{party_id}_{boss_id}_butylka")])
+    kb.append([InlineKeyboardButton("🔧 Гаечный ключ (50🍺)", callback_data=f"party_attack_{party_id}_{boss_id}_klyuch")])
+    kb.append([InlineKeyboardButton("📎 Пригласить друзей", callback_data=f"party_invite_{party_id}_{boss_id}")])
+    kb.append([InlineKeyboardButton("🔙 Назад", callback_data="bosses_menu")])
     return InlineKeyboardMarkup(kb)
 
-def get_attack_keyboard(boss_id: int):
-    kb = [
-        [InlineKeyboardButton("🔪 Заточка (0🍺)", callback_data=f"attack_{boss_id}_zatochka")],
-        [InlineKeyboardButton("🍾 Бутылка (20🍺)", callback_data=f"attack_{boss_id}_butylka")],
-        [InlineKeyboardButton("🔧 Гаечный ключ (50🍺)", callback_data=f"attack_{boss_id}_klyuch")],
-        [InlineKeyboardButton("👥 Создать пати", callback_data=f"create_party_{boss_id}")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="bosses_menu")]
-    ]
+def get_attack_keyboard(boss_id: int, user_id: int):
+    can_attack, cooldown = get_attack_cooldown(user_id, boss_id)
+    kb = []
+    
+    if can_attack:
+        kb.append([InlineKeyboardButton("🔪 Заточка (0🍺)", callback_data=f"attack_{boss_id}_zatochka")])
+    else:
+        minutes = cooldown // 60
+        seconds = cooldown % 60
+        kb.append([InlineKeyboardButton(f"⏳ Заточка: {minutes}м {seconds}с", callback_data="noop")])
+    
+    kb.append([InlineKeyboardButton("🍾 Бутылка (20🍺)", callback_data=f"attack_{boss_id}_butylka")])
+    kb.append([InlineKeyboardButton("🔧 Гаечный ключ (50🍺)", callback_data=f"attack_{boss_id}_klyuch")])
+    kb.append([InlineKeyboardButton("👥 Создать пати", callback_data=f"create_party_{boss_id}")])
+    kb.append([InlineKeyboardButton("🔙 Назад", callback_data="bosses_menu")])
     return InlineKeyboardMarkup(kb)
 
 def get_earn_keyboard():
@@ -728,7 +831,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             stats = get_boss_stats(boss_id, info["respect"])
             attacks = get_daily_attacks(user_id)
             text = f"👑 *{stats['name']}*\n{stats['desc']}\n\n❤️ HP: {stats['hp']}\n🎁 Награда: {stats['reward_xp']}XP, {stats['reward_chifir']}🍺\n⚔️ Твой урон заточкой: +{info['zatochka_damage']}\n📊 Атак сегодня: {attacks}/{DAILY_ATTACK_LIMIT}"
-            await query.edit_message_text(text, reply_markup=get_attack_keyboard(boss_id), parse_mode="Markdown")
+            await query.edit_message_text(text, reply_markup=get_attack_keyboard(boss_id, user_id), parse_mode="Markdown")
         except Exception as e:
             await query.edit_message_text(f"❌ Ошибка: {e}", reply_markup=get_back("bosses_menu"))
     
@@ -783,7 +886,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"⏳ До конца битвы: {time_left} мин\n\n"
             text += f"*Нанеси удар!*"
             
-            await query.edit_message_text(text, reply_markup=get_party_action_keyboard(party_id, party["boss_id"]), parse_mode="Markdown")
+            await query.edit_message_text(text, reply_markup=get_party_action_keyboard(party_id, party["boss_id"], user_id), parse_mode="Markdown")
         except Exception as e:
             await query.edit_message_text(f"❌ Ошибка: {e}", reply_markup=get_back("bosses_menu"))
     
@@ -808,21 +911,37 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 attacks = get_daily_attacks(user_id)
                 if not is_admin(user_id) and attacks >= DAILY_ATTACK_LIMIT:
                     await query.edit_message_text(f"❌ Лимит атак ({DAILY_ATTACK_LIMIT}) исчерпан!")
-                    await query.message.reply_text("⬅️ Меню", reply_markup=get_main_keyboard(user_id), parse_mode="Markdown")
+                    kb = [[InlineKeyboardButton("🔙 Назад", callback_data="bosses_menu")]]
+                    await query.message.reply_text("⬅️ К боссам", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
                     return
                 
                 if atk["cost"] > 0 and info["chifir"] < atk["cost"]:
                     await query.edit_message_text(f"❌ Нужно {atk['cost']}🍺, у тебя {info['chifir']}🍺")
+                    kb = [[InlineKeyboardButton("🔙 Назад", callback_data="bosses_menu")]]
+                    await query.message.reply_text("⬅️ К боссам", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
                     return
+                
+                # Проверка кулдауна для заточки
+                if atk_type == "zatochka":
+                    can_attack, cooldown = get_attack_cooldown(user_id, boss_id)
+                    if not can_attack:
+                        minutes = cooldown // 60
+                        seconds = cooldown % 60
+                        kb = [[InlineKeyboardButton("🔙 Назад", callback_data="bosses_menu")]]
+                        await query.edit_message_text(f"⏳ Ты можешь ударить заточкой через {minutes} мин {seconds} сек!", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+                        return
                 
                 if atk["cost"] > 0:
                     remove_chifir(user_id, atk["cost"])
                 
-                # РАСЧЕТ УРОНА - ИСПРАВЛЕНО!
                 damage = get_attack_damage(atk_type, info["zatochka"], boss_id)
                 new_hp = max(0, party["boss_current_hp"] - damage)
                 update_party_hp(party_id, new_hp)
                 increment_daily_attacks(user_id)
+                
+                # Устанавливаем кулдаун для заточки
+                if atk_type == "zatochka":
+                    set_attack_cooldown(user_id, boss_id)
                 
                 if new_hp <= 0:
                     await end_party_battle(party_id, True, context)
@@ -844,7 +963,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     conn.commit()
                     conn.close()
                     
-                    # Оповещаем всех участников пати об атаке
                     members, current_hp = get_party_members_hp(party_id)
                     for member_id in members:
                         if int(member_id) != user_id:
@@ -866,7 +984,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"❤️ Общий HP босса: {new_hp}/{party['boss_max_hp']}",
                         parse_mode="Markdown")
                 
-                await query.message.reply_text("⬅️ К боссам", reply_markup=get_bosses_keyboard(user_id), parse_mode="Markdown")
+                kb = [[InlineKeyboardButton("🔙 Назад к боссам", callback_data="bosses_menu")]]
+                await query.message.reply_text("⬅️ Вернуться", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
             else:
                 await query.edit_message_text("❌ Ошибка формата атаки!", reply_markup=get_back("bosses_menu"))
         except Exception as e:
@@ -911,21 +1030,37 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 attacks = get_daily_attacks(user_id)
                 if not is_admin(user_id) and attacks >= DAILY_ATTACK_LIMIT:
                     await query.edit_message_text(f"❌ Лимит атак ({DAILY_ATTACK_LIMIT}) исчерпан!")
-                    await query.message.reply_text("⬅️ Меню", reply_markup=get_main_keyboard(user_id), parse_mode="Markdown")
+                    kb = [[InlineKeyboardButton("🔙 Назад", callback_data="bosses_menu")]]
+                    await query.message.reply_text("⬅️ К боссам", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
                     return
                 
                 if atk["cost"] > 0 and info["chifir"] < atk["cost"]:
                     await query.edit_message_text(f"❌ Нужно {atk['cost']}🍺, у тебя {info['chifir']}🍺")
+                    kb = [[InlineKeyboardButton("🔙 Назад", callback_data="bosses_menu")]]
+                    await query.message.reply_text("⬅️ К боссам", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
                     return
+                
+                # Проверка кулдауна для заточки
+                if atk_type == "zatochka":
+                    can_attack, cooldown = get_attack_cooldown(user_id, boss_id)
+                    if not can_attack:
+                        minutes = cooldown // 60
+                        seconds = cooldown % 60
+                        kb = [[InlineKeyboardButton("🔙 Назад", callback_data="bosses_menu")]]
+                        await query.edit_message_text(f"⏳ Ты можешь ударить заточкой через {minutes} мин {seconds} сек!", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+                        return
                 
                 if atk["cost"] > 0:
                     remove_chifir(user_id, atk["cost"])
                 
-                # РАСЧЕТ УРОНА - ИСПРАВЛЕНО!
                 damage = get_attack_damage(atk_type, info["zatochka"], boss_id)
                 new_hp = max(0, progress["hp"] - damage)
                 update_boss_hp(user_id, boss_id, new_hp)
                 increment_daily_attacks(user_id)
+                
+                # Устанавливаем кулдаун для заточки
+                if atk_type == "zatochka":
+                    set_attack_cooldown(user_id, boss_id)
                 
                 if new_hp <= 0:
                     add_xp(user_id, stats["reward_xp"], name)
@@ -961,7 +1096,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"❤️ HP босса: {new_hp}/{stats['hp']}",
                         parse_mode="Markdown")
                 
-                await query.message.reply_text("⬅️ К боссам", reply_markup=get_bosses_keyboard(user_id), parse_mode="Markdown")
+                kb = [[InlineKeyboardButton("🔙 Назад к боссам", callback_data="bosses_menu")]]
+                await query.message.reply_text("⬅️ Вернуться", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
             else:
                 await query.edit_message_text("❌ Ошибка атаки!", reply_markup=get_back("bosses_menu"))
         except Exception as e:
@@ -1092,7 +1228,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"📊 *Статистика*\n\n👥 Игроков: {total}\n📈 Средний авторитет: {avg:.1f}\n👑 Побед: {kills}", reply_markup=get_back("admin_panel"), parse_mode="Markdown")
     
     elif data == "admin_daily" and is_admin(user_id):
-        await query.edit_message_text(f"📈 *Статистика за {datetime.now().strftime('%d.%m.%Y')}*", reply_markup=get_back("admin_panel"), parse_mode="Markdown")
+        stats = get_daily_stats()
+        today = get_moscow_date()
+        await query.edit_message_text(
+            f"📈 *Статистика за {today}*\n\n"
+            f"🆕 Новых игроков: {stats['new']}\n"
+            f"🎮 Активных игроков: {stats['active']}\n\n"
+            f"_Статистика обновляется в реальном времени_",
+            reply_markup=get_back("admin_panel"), parse_mode="Markdown")
     
     elif data == "admin_list" and is_admin(user_id):
         page = context.user_data.get('admin_page', 0)
@@ -1386,7 +1529,6 @@ def main():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
-    # Создание таблиц если их нет
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS zeks (
             user_id INTEGER PRIMARY KEY,
@@ -1505,6 +1647,7 @@ def main():
     job_queue = app.job_queue
     if job_queue:
         job_queue.run_repeating(check_expired_parties, interval=300, first=10)
+        print("✅ JobQueue запущен")
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_callback))
@@ -1512,6 +1655,8 @@ def main():
     
     print("⛓️ Тюряга бот запущен!")
     print(f"👑 Админы: {ADMIN_IDS}")
+    print("⚔️ Лимит между ударами заточкой: 3 минуты")
+    print("📊 Статистика обновляется в реальном времени")
     app.run_polling()
 
 if __name__ == "__main__":
