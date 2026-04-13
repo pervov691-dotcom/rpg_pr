@@ -25,6 +25,9 @@ LEVEL_MULTIPLIER = 1.12
 DAILY_ATTACK_LIMIT = 25
 PARTY_TIME_HOURS = 3
 
+# БАЗОВЫЙ УРОН ЗАТОЧКИ (1 уровень)
+BASE_SHANK_DAMAGE = 15
+
 # БОССЫ
 BOSSES = {
     1: {"name": "Шнырь", "desc": "Местный шестёрка", "base_hp": 80, "base_damage": 8, "reward_xp": 80, "reward_chifir": 40, "min_respect": 1},
@@ -44,199 +47,19 @@ EARN_METHODS = {
     "fight": {"name": "👊 Драка", "min": 15, "max": 30, "cooldown": 900}
 }
 
-# ===== МИГРАЦИЯ БД =====
-def migrate_db():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    
-    try:
-        cursor.execute("ALTER TABLE parties ADD COLUMN boss_max_hp INTEGER DEFAULT 0")
-    except: pass
-    try:
-        cursor.execute("ALTER TABLE parties ADD COLUMN leader_id INTEGER DEFAULT 0")
-    except: pass
-    try:
-        cursor.execute("ALTER TABLE zeks ADD COLUMN daily_attacks INTEGER DEFAULT 0")
-    except: pass
-    try:
-        cursor.execute("ALTER TABLE zeks ADD COLUMN is_admin_hidden BOOLEAN DEFAULT 0")
-    except: pass
-    try:
-        cursor.execute("ALTER TABLE zeks ADD COLUMN last_krysa TEXT")
-    except: pass
-    try:
-        cursor.execute("ALTER TABLE boss_fights ADD COLUMN party_id INTEGER DEFAULT 0")
-    except: pass
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS feedback (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            username TEXT,
-            message TEXT,
-            created_at TEXT,
-            is_read BOOLEAN DEFAULT 0
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS daily_stats (
-            date TEXT PRIMARY KEY,
-            new_players INTEGER DEFAULT 0,
-            active_players INTEGER DEFAULT 0
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS gifts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            from_user INTEGER,
-            to_user INTEGER,
-            amount INTEGER,
-            created_at TEXT
-        )
-    ''')
-    
-    cursor.execute("UPDATE parties SET boss_max_hp = boss_current_hp WHERE boss_max_hp = 0")
-    conn.commit()
-    conn.close()
-
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS zeks (
-            user_id INTEGER PRIMARY KEY,
-            name TEXT,
-            respect INTEGER DEFAULT 1,
-            xp INTEGER DEFAULT 0,
-            total_xp INTEGER DEFAULT 0,
-            zatochka INTEGER DEFAULT 1,
-            chifir INTEGER DEFAULT 50,
-            boss_kills INTEGER DEFAULT 0,
-            krysa_count INTEGER DEFAULT 0,
-            last_krysa TEXT,
-            last_active TEXT,
-            is_banned BOOLEAN DEFAULT 0,
-            ban_until TEXT,
-            is_admin_hidden BOOLEAN DEFAULT 0,
-            created_at TEXT,
-            daily_attacks INTEGER DEFAULT 0
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS boss_fights (
-            user_id INTEGER,
-            boss_id INTEGER,
-            current_hp INTEGER,
-            last_fight TEXT,
-            party_id INTEGER DEFAULT 0,
-            PRIMARY KEY (user_id, boss_id)
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS parties (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            boss_id INTEGER,
-            boss_current_hp INTEGER,
-            boss_max_hp INTEGER,
-            members TEXT,
-            leader_id INTEGER,
-            created_at TEXT,
-            expires_at TEXT,
-            is_active BOOLEAN DEFAULT 1
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS daily_havka (
-            user_id INTEGER PRIMARY KEY,
-            last_claim TEXT,
-            streak INTEGER DEFAULT 0
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS work_cooldown (
-            user_id INTEGER,
-            work_type TEXT,
-            last_used TEXT,
-            PRIMARY KEY (user_id, work_type)
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS referrals (
-            user_id INTEGER PRIMARY KEY,
-            referred_by INTEGER,
-            bonus_claimed BOOLEAN DEFAULT 0,
-            referred_at TEXT
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS attack_cooldown (
-            user_id INTEGER,
-            boss_id INTEGER,
-            last_attack TEXT,
-            PRIMARY KEY (user_id, boss_id)
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS feedback (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            username TEXT,
-            message TEXT,
-            created_at TEXT,
-            is_read BOOLEAN DEFAULT 0
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS daily_stats (
-            date TEXT PRIMARY KEY,
-            new_players INTEGER DEFAULT 0,
-            active_players INTEGER DEFAULT 0
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS gifts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            from_user INTEGER,
-            to_user INTEGER,
-            amount INTEGER,
-            created_at TEXT
-        )
-    ''')
-    
-    conn.commit()
-    conn.close()
-
-# ===== ОСНОВНЫЕ ФУНКЦИИ =====
-def get_xp_for_respect(respect: int) -> int:
-    return int(BASE_XP_PER_LEVEL * (LEVEL_MULTIPLIER ** (respect - 1)))
-
-def get_respect_from_xp(total_xp: int) -> Tuple[int, int]:
-    respect = 1
-    while total_xp >= get_xp_for_respect(respect):
-        total_xp -= get_xp_for_respect(respect)
-        respect += 1
-    return respect, total_xp
-
+# ===== ФУНКЦИИ =====
 def get_zatochka_damage(level: int) -> int:
-    return 10 + (level - 1) * 5
+    """Урон заточки: базовый 15 + 5 за каждый уровень"""
+    return BASE_SHANK_DAMAGE + (level - 1) * 5
 
 def get_zatochka_cost(level: int) -> int:
     return 50 + (level - 1) * 25
 
 def get_boss_stats(boss_id: int, respect: int) -> dict:
     boss = BOSSES[boss_id]
-    mult = 1 + (respect - boss["min_respect"]) * 0.08 if respect >= boss["min_respect"] else 0.5
-    mult = max(0.5, min(mult, 2.5))
+    # Множитель сложности от авторитета игрока
+    mult = 1 + (respect - boss["min_respect"]) * 0.05 if respect >= boss["min_respect"] else 0.5
+    mult = max(0.5, min(mult, 2.0))
     return {
         "name": boss["name"],
         "desc": boss["desc"],
@@ -246,6 +69,31 @@ def get_boss_stats(boss_id: int, respect: int) -> dict:
         "reward_chifir": int(boss["reward_chifir"] * mult),
         "min_respect": boss["min_respect"]
     }
+
+def get_attack_damage(attack_type: str, zatochka_level: int, boss_id: int = None) -> int:
+    """Расчет урона с учетом типа атаки и уровня заточки"""
+    base_damage = get_zatochka_damage(zatochka_level)
+    mult = ATTACKS[attack_type]["damage_mult"]
+    damage = int(base_damage * mult)
+    
+    # Бонусы против определенных боссов
+    if boss_id == 2 and attack_type == "butylka":
+        damage = int(damage * 1.3)  # Бутылка эффективна против Баклана
+    elif boss_id == 3 and attack_type == "klyuch":
+        damage = int(damage * 1.2)  # Ключ эффективен против Вора
+    
+    return max(1, damage)
+
+# ===== ОСТАЛЬНЫЕ ФУНКЦИИ (сокращены для экономии места, но основные остаются) =====
+def get_xp_for_respect(respect: int) -> int:
+    return int(BASE_XP_PER_LEVEL * (LEVEL_MULTIPLIER ** (respect - 1)))
+
+def get_respect_from_xp(total_xp: int) -> Tuple[int, int]:
+    respect = 1
+    while total_xp >= get_xp_for_respect(respect):
+        total_xp -= get_xp_for_respect(respect)
+        respect += 1
+    return respect, total_xp
 
 def get_referrals_count(user_id: int) -> int:
     try:
@@ -350,6 +198,133 @@ def get_all_players(page: int = 0, per_page: int = 15):
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
+def get_daily_attacks(user_id: int) -> int:
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT daily_attacks FROM zeks WHERE user_id = ?", (user_id,))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else 0
+    except:
+        return 0
+
+def increment_daily_attacks(user_id: int):
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE zeks SET daily_attacks = daily_attacks + 1 WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+    except:
+        pass
+
+def reset_daily_attacks():
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE zeks SET daily_attacks = 0")
+        conn.commit()
+        conn.close()
+    except:
+        pass
+
+def get_boss_progress(user_id: int, boss_id: int) -> dict:
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT current_hp FROM boss_fights WHERE user_id = ? AND boss_id = ?", (user_id, boss_id))
+    result = cursor.fetchone()
+    conn.close()
+    info = get_zek_info(user_id)
+    boss_stats = get_boss_stats(boss_id, info["respect"] if info else 1)
+    hp = result[0] if result and result[0] and result[0] > 0 else boss_stats["hp"]
+    return {"hp": hp, "is_active": True}
+
+def update_boss_hp(user_id: int, boss_id: int, new_hp: int):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('INSERT OR REPLACE INTO boss_fights (user_id, boss_id, current_hp, last_fight) VALUES (?, ?, ?, ?)',
+                  (user_id, boss_id, new_hp, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+def can_work(user_id: int, work_type: str):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT last_used FROM work_cooldown WHERE user_id = ? AND work_type = ?", (user_id, work_type))
+    result = cursor.fetchone()
+    conn.close()
+    if not result or not result[0]:
+        return True, 0
+    last = datetime.fromisoformat(result[0])
+    left = EARN_METHODS[work_type]["cooldown"] - (datetime.now() - last).total_seconds()
+    return (True, 0) if left <= 0 else (False, int(left))
+
+def set_work_cooldown(user_id: int, work_type: str):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('INSERT OR REPLACE INTO work_cooldown (user_id, work_type, last_used) VALUES (?, ?, ?)',
+                  (user_id, work_type, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+def get_havka_cooldown(user_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT last_claim FROM daily_havka WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    if not result or not result[0]:
+        return True, 0
+    last = datetime.fromisoformat(result[0])
+    left = 10800 - (datetime.now() - last).total_seconds()
+    return (True, 0) if left <= 0 else (False, int(left))
+
+def set_havka_cooldown(user_id: int, streak: int):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO daily_havka VALUES (?, ?, ?)", (user_id, datetime.now().isoformat(), streak))
+    conn.commit()
+    conn.close()
+
+def can_krysa(user_id: int):
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT last_krysa FROM zeks WHERE user_id = ?", (user_id,))
+        result = cursor.fetchone()
+        conn.close()
+        if not result or not result[0]:
+            return True, 0
+        last = datetime.fromisoformat(result[0])
+        left = 3600 - (datetime.now() - last).total_seconds()
+        return (True, 0) if left <= 0 else (False, int(left))
+    except:
+        return True, 0
+
+def set_krysa_cooldown(user_id: int):
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE zeks SET last_krysa = ? WHERE user_id = ?", (datetime.now().isoformat(), user_id))
+        conn.commit()
+        conn.close()
+    except:
+        pass
+
+def add_referral(user_id: int, referrer_id: int):
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM referrals WHERE user_id = ?", (user_id,))
+        if not cursor.fetchone():
+            cursor.execute('INSERT INTO referrals (user_id, referred_by, bonus_claimed, referred_at) VALUES (?, ?, 0, ?)',
+                          (user_id, referrer_id, datetime.now().isoformat()))
+            conn.commit()
+        conn.close()
+    except:
+        pass
+
 def add_feedback(user_id: int, username: str, message: str) -> bool:
     if len(message) > 1000:
         return False
@@ -385,63 +360,7 @@ def send_gift(from_user: int, to_user: int, amount: int) -> bool:
     conn.close()
     return True
 
-def can_krysa(user_id: int):
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute("SELECT last_krysa FROM zeks WHERE user_id = ?", (user_id,))
-        result = cursor.fetchone()
-        conn.close()
-        if not result or not result[0]:
-            return True, 0
-        last = datetime.fromisoformat(result[0])
-        left = 3600 - (datetime.now() - last).total_seconds()
-        return (True, 0) if left <= 0 else (False, int(left))
-    except:
-        return True, 0
-
-def set_krysa_cooldown(user_id: int):
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute("UPDATE zeks SET last_krysa = ? WHERE user_id = ?", (datetime.now().isoformat(), user_id))
-        conn.commit()
-        conn.close()
-    except:
-        pass
-
-def get_daily_attacks(user_id: int) -> int:
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute("SELECT daily_attacks FROM zeks WHERE user_id = ?", (user_id,))
-        result = cursor.fetchone()
-        conn.close()
-        return result[0] if result else 0
-    except:
-        return 0
-
-def increment_daily_attacks(user_id: int):
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute("UPDATE zeks SET daily_attacks = daily_attacks + 1 WHERE user_id = ?", (user_id,))
-        conn.commit()
-        conn.close()
-    except:
-        pass
-
-def reset_daily_attacks():
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute("UPDATE zeks SET daily_attacks = 0")
-        conn.commit()
-        conn.close()
-    except:
-        pass
-
-# ===== ФУНКЦИИ ПАТИ-БИТВ =====
+# ===== ФУНКЦИИ ПАТИ =====
 def create_party(leader_id: int, boss_id: int, boss_hp: int, boss_max_hp: int) -> int:
     expires = (datetime.now() + timedelta(hours=PARTY_TIME_HOURS)).isoformat()
     conn = sqlite3.connect(DB_NAME)
@@ -600,58 +519,6 @@ def cleanup_expired_parties(context: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(end_party_battle(party[0], False, context))
     conn.close()
 
-def get_havka_cooldown(user_id: int):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT last_claim FROM daily_havka WHERE user_id = ?", (user_id,))
-    result = cursor.fetchone()
-    conn.close()
-    if not result or not result[0]:
-        return True, 0
-    last = datetime.fromisoformat(result[0])
-    left = 10800 - (datetime.now() - last).total_seconds()
-    return (True, 0) if left <= 0 else (False, int(left))
-
-def set_havka_cooldown(user_id: int, streak: int):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO daily_havka VALUES (?, ?, ?)", (user_id, datetime.now().isoformat(), streak))
-    conn.commit()
-    conn.close()
-
-def can_work(user_id: int, work_type: str):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT last_used FROM work_cooldown WHERE user_id = ? AND work_type = ?", (user_id, work_type))
-    result = cursor.fetchone()
-    conn.close()
-    if not result or not result[0]:
-        return True, 0
-    last = datetime.fromisoformat(result[0])
-    left = EARN_METHODS[work_type]["cooldown"] - (datetime.now() - last).total_seconds()
-    return (True, 0) if left <= 0 else (False, int(left))
-
-def set_work_cooldown(user_id: int, work_type: str):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('INSERT OR REPLACE INTO work_cooldown (user_id, work_type, last_used) VALUES (?, ?, ?)',
-                  (user_id, work_type, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
-
-def add_referral(user_id: int, referrer_id: int):
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM referrals WHERE user_id = ?", (user_id,))
-        if not cursor.fetchone():
-            cursor.execute('INSERT INTO referrals (user_id, referred_by, bonus_claimed, referred_at) VALUES (?, ?, 0, ?)',
-                          (user_id, referrer_id, datetime.now().isoformat()))
-            conn.commit()
-        conn.close()
-    except:
-        pass
-
 # ===== КЛАВИАТУРЫ =====
 def get_main_keyboard(user_id: int):
     kb = [
@@ -769,23 +636,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.effective_user.first_name or f"zek_{user_id}"
     
     if context.args and len(context.args) > 0:
-        if context.args[0].startswith("battle_"):
+        arg = context.args[0]
+        if arg.startswith("battle_"):
             try:
-                parts = context.args[0].split("_")
+                parts = arg.split("_")
                 if len(parts) >= 3:
                     party_id = int(parts[1])
                     boss_id = int(parts[2])
                     party = get_party(party_id)
                     if party:
-                        join_party(user_id, party_id, boss_id)
-                        await update.message.reply_text(f"👥 Ты присоединился к битве с боссом {BOSSES[boss_id]['name']}!")
+                        if str(user_id) not in party["members"]:
+                            join_party(user_id, party_id, boss_id)
+                            await update.message.reply_text(f"👥 Ты присоединился к битве с боссом {BOSSES[boss_id]['name']}!")
+                        else:
+                            await update.message.reply_text(f"👥 Ты уже в битве с боссом {BOSSES[boss_id]['name']}!")
                     else:
                         await update.message.reply_text("❌ Пати уже не существует!")
             except:
                 pass
         else:
             try:
-                ref = int(context.args[0])
+                ref = int(arg)
                 if ref != user_id:
                     add_referral(user_id, ref)
                     await update.message.reply_text("🤝 Ты пришёл по приглашению!")
@@ -802,7 +673,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⛓️ *ТЮРЯГА* ⛓️\n\n"
         f"👤 *{info['name']}*\n"
         f"📊 Авторитет: *{info['respect']}* (#{get_player_rank(user_id)})\n"
-        f"⚔️ Заточка: +{info['zatochka_damage']} (ур.{info['zatochka']})\n"
+        f"⚔️ Заточка: +{info['zatochka_damage']} урона (ур.{info['zatochka']})\n"
         f"🍺 Чифира: {info['chifir']}\n"
         f"👑 Побед: {info['boss_kills']}\n"
         f"🐀 Крысят: {info['krysa_count']}\n"
@@ -841,7 +712,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cursor.execute("UPDATE zeks SET zatochka = zatochka + 1 WHERE user_id = ?", (user_id,))
             conn.commit()
             conn.close()
-            await query.edit_message_text(f"✅ Заточка повышена до {info['zatochka'] + 1} уровня!", parse_mode="Markdown")
+            await query.edit_message_text(f"✅ Заточка повышена до {info['zatochka'] + 1} уровня!\nНовый урон: +{get_zatochka_damage(info['zatochka'] + 1)}", parse_mode="Markdown")
         else:
             await query.edit_message_text(f"❌ Нужно {info['upgrade_cost']}🍺, у тебя {info['chifir']}🍺")
         await query.message.reply_text("⬅️ Меню", reply_markup=get_main_keyboard(user_id), parse_mode="Markdown")
@@ -856,7 +727,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             info = get_zek_info(user_id)
             stats = get_boss_stats(boss_id, info["respect"])
             attacks = get_daily_attacks(user_id)
-            text = f"👑 *{stats['name']}*\n{stats['desc']}\n\n❤️ HP: {stats['hp']}\n🎁 Награда: {stats['reward_xp']}XP, {stats['reward_chifir']}🍺\n📊 Атак сегодня: {attacks}/{DAILY_ATTACK_LIMIT}"
+            text = f"👑 *{stats['name']}*\n{stats['desc']}\n\n❤️ HP: {stats['hp']}\n🎁 Награда: {stats['reward_xp']}XP, {stats['reward_chifir']}🍺\n⚔️ Твой урон заточкой: +{info['zatochka_damage']}\n📊 Атак сегодня: {attacks}/{DAILY_ATTACK_LIMIT}"
             await query.edit_message_text(text, reply_markup=get_attack_keyboard(boss_id), parse_mode="Markdown")
         except Exception as e:
             await query.edit_message_text(f"❌ Ошибка: {e}", reply_markup=get_back("bosses_menu"))
@@ -870,8 +741,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             existing = get_party_by_boss(boss_id)
             if existing:
-                await query.edit_message_text(f"❌ Пати для босса {BOSSES[boss_id]['name']} уже существует!")
-                await query.message.reply_text("⬅️ Меню", reply_markup=get_main_keyboard(user_id), parse_mode="Markdown")
+                await query.edit_message_text(f"❌ Пати для босса {BOSSES[boss_id]['name']} уже существует!", reply_markup=get_back("bosses_menu"))
                 return
             
             party_id = create_party(user_id, boss_id, stats["hp"], stats["hp"])
@@ -900,6 +770,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("❌ Пати не найдена!", reply_markup=get_back("bosses_menu"))
                 return
             
+            info = get_zek_info(user_id)
             hp_percent = int(party["boss_current_hp"] / party["boss_max_hp"] * 100) if party["boss_max_hp"] > 0 else 0
             members_count = len(party["members"])
             time_left = max(0, (datetime.fromisoformat(party["expires_at"]) - datetime.now()).seconds // 60)
@@ -907,6 +778,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = f"👥 *Пати против {BOSSES[party['boss_id']]['name']}*\n\n"
             text += f"❤️ Общий HP босса: {party['boss_current_hp']}/{party['boss_max_hp']} ({hp_percent}%)\n"
             text += f"👥 Участников: {members_count}\n"
+            text += f"⚔️ Твой урон заточкой: +{info['zatochka_damage']}\n"
             text += f"👑 Лидер: {party['leader_id']}\n"
             text += f"⏳ До конца битвы: {time_left} мин\n\n"
             text += f"*Нанеси удар!*"
@@ -946,7 +818,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if atk["cost"] > 0:
                     remove_chifir(user_id, atk["cost"])
                 
-                damage = int(get_zatochka_damage(info["zatochka"]) * atk["damage_mult"])
+                # РАСЧЕТ УРОНА - ИСПРАВЛЕНО!
+                damage = get_attack_damage(atk_type, info["zatochka"], boss_id)
                 new_hp = max(0, party["boss_current_hp"] - damage)
                 update_party_hp(party_id, new_hp)
                 increment_daily_attacks(user_id)
@@ -955,7 +828,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await end_party_battle(party_id, True, context)
                     await query.edit_message_text(
                         f"🎉 *ПОБЕДА ПАТИ!* 🎉\n\n"
-                        f"Твой удар: {damage}\n"
+                        f"Твой урон: {damage}\n"
                         f"Босс {stats['name']} повержен!\n\n"
                         f"Все участники получили награду!",
                         parse_mode="Markdown")
@@ -1011,10 +884,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 await query.edit_message_text(
                     f"📎 *Пригласи друзей в битву!*\n\n"
-                    f"Отправь эту ссылку:\n`{invite_link}`\n\n"
-                    f"Когда друзья перейдут по ссылке, они присоединятся к пати!\n"
-                    f"Все участники будут наносить урон одному боссу!\n\n"
-                    f"👥 Текущий состав пати можно посмотреть в меню боссов.",
+                    f"📋 *Ссылка для приглашения:*\n`{invite_link}`\n\n"
+                    f"👥 *Как это работает:*\n"
+                    f"• Отправь ссылку друзьям\n"
+                    f"• Когда друг перейдёт по ссылке, он автоматически присоединится к пати\n"
+                    f"• Все участники наносят урон одному боссу\n"
+                    f"• Урон суммируется",
                     reply_markup=get_back(f"party_view_{party_id}"), parse_mode="Markdown")
             else:
                 await query.edit_message_text("❌ Ошибка!", reply_markup=get_back("bosses_menu"))
@@ -1031,6 +906,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 info = get_zek_info(user_id)
                 stats = get_boss_stats(boss_id, info["respect"])
                 atk = ATTACKS[atk_type]
+                progress = get_boss_progress(user_id, boss_id)
                 
                 attacks = get_daily_attacks(user_id)
                 if not is_admin(user_id) and attacks >= DAILY_ATTACK_LIMIT:
@@ -1045,23 +921,45 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if atk["cost"] > 0:
                     remove_chifir(user_id, atk["cost"])
                 
-                damage = int(get_zatochka_damage(info["zatochka"]) * atk["damage_mult"])
-                
-                add_xp(user_id, stats["reward_xp"], name)
-                add_chifir(user_id, stats["reward_chifir"])
+                # РАСЧЕТ УРОНА - ИСПРАВЛЕНО!
+                damage = get_attack_damage(atk_type, info["zatochka"], boss_id)
+                new_hp = max(0, progress["hp"] - damage)
+                update_boss_hp(user_id, boss_id, new_hp)
                 increment_daily_attacks(user_id)
                 
-                conn = sqlite3.connect(DB_NAME)
-                cursor = conn.cursor()
-                cursor.execute("UPDATE zeks SET boss_kills = boss_kills + 1 WHERE user_id = ?", (user_id,))
-                conn.commit()
-                conn.close()
-                
-                await query.edit_message_text(
-                    f"🎉 *ПОБЕДА!*\n\n"
-                    f"Твой урон: {damage}\n"
-                    f"+{stats['reward_xp']}XP, +{stats['reward_chifir']}🍺",
-                    parse_mode="Markdown")
+                if new_hp <= 0:
+                    add_xp(user_id, stats["reward_xp"], name)
+                    add_chifir(user_id, stats["reward_chifir"])
+                    
+                    conn = sqlite3.connect(DB_NAME)
+                    cursor = conn.cursor()
+                    cursor.execute("UPDATE zeks SET boss_kills = boss_kills + 1 WHERE user_id = ?", (user_id,))
+                    conn.commit()
+                    conn.close()
+                    
+                    await query.edit_message_text(
+                        f"🎉 *ПОБЕДА!*\n\n"
+                        f"Твой урон: {damage}\n"
+                        f"+{stats['reward_xp']}XP, +{stats['reward_chifir']}🍺",
+                        parse_mode="Markdown")
+                else:
+                    counter = max(1, stats["damage"] // 15)
+                    conn = sqlite3.connect(DB_NAME)
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT total_xp FROM zeks WHERE user_id = ?", (user_id,))
+                    total = cursor.fetchone()[0]
+                    new_total = max(0, total - counter)
+                    new_respect, new_xp = get_respect_from_xp(new_total)
+                    cursor.execute("UPDATE zeks SET total_xp = ?, respect = ?, xp = ? WHERE user_id = ?", (new_total, new_respect, new_xp, user_id))
+                    conn.commit()
+                    conn.close()
+                    
+                    await query.edit_message_text(
+                        f"⚔️ *Битва!*\n\n"
+                        f"Твой урон: -{damage}❤️\n"
+                        f"Босс контратакует: -{counter}XP\n"
+                        f"❤️ HP босса: {new_hp}/{stats['hp']}",
+                        parse_mode="Markdown")
                 
                 await query.message.reply_text("⬅️ К боссам", reply_markup=get_bosses_keyboard(user_id), parse_mode="Markdown")
             else:
@@ -1120,7 +1018,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Прогресс
     elif data == "progress":
         info = get_zek_info(user_id)
-        text = f"📈 *Прогресс*\n🎯 Авторитет: {info['respect']}\n⚔️ Заточка: ур.{info['zatochka']}\n👑 Побед: {info['boss_kills']}\n🍺 Чифира: {info['chifir']}\n🤝 Друзей: {get_referrals_count(user_id)}\n⚡ Бонус: {int((1-get_user_cooldown_multiplier(user_id))*100)}%\n📊 До уровня: {info['xp_to_next']}XP"
+        text = f"📈 *Прогресс*\n🎯 Авторитет: {info['respect']}\n⚔️ Заточка: ур.{info['zatochka']} (+{info['zatochka_damage']})\n👑 Побед: {info['boss_kills']}\n🍺 Чифира: {info['chifir']}\n🤝 Друзей: {get_referrals_count(user_id)}\n⚡ Бонус: {int((1-get_user_cooldown_multiplier(user_id))*100)}%\n📊 До уровня: {info['xp_to_next']}XP"
         await query.edit_message_text(text, parse_mode="Markdown")
         await query.message.reply_text("⬅️ Меню", reply_markup=get_main_keyboard(user_id), parse_mode="Markdown")
     
@@ -1162,7 +1060,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Обратная связь
     elif data == "feedback_start":
         context.user_data['feedback_step'] = 'text'
-        await query.edit_message_text("💬 *Напиши своё сообщение* (до 1000 символов):\n\n(нажми Назад для отмены)", reply_markup=get_back("back_to_menu"), parse_mode="Markdown")
+        await query.edit_message_text("💬 *Напиши своё сообщение* (до 1000 символов):", reply_markup=get_back("back_to_menu"), parse_mode="Markdown")
     
     # Реферал
     elif data == "referral":
@@ -1170,7 +1068,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         link = f"https://t.me/{bot}?start={user_id}"
         count = get_referrals_count(user_id)
         bonus = int((1 - get_user_cooldown_multiplier(user_id)) * 100)
-        await query.edit_message_text(f"🤝 *Пригласи друга*\n\n📎 {link}\n\n👥 Друзей: {count}\n⚡ Бонус скорости: {bonus}%", reply_markup=get_back("back_to_menu"), parse_mode="Markdown")
+        await query.edit_message_text(
+            f"🤝 *Пригласи друга в Тюрягу!*\n\n"
+            f"📎 *Твоя реферальная ссылка:*\n`{link}`\n\n"
+            f"👥 Приглашено друзей: {count}\n"
+            f"⚡ Бонус скорости: {bonus}%",
+            reply_markup=get_back("back_to_menu"), parse_mode="Markdown")
     
     # ===== АДМИН-ПАНЕЛЬ =====
     elif data == "admin_panel" and is_admin(user_id):
@@ -1189,7 +1092,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"📊 *Статистика*\n\n👥 Игроков: {total}\n📈 Средний авторитет: {avg:.1f}\n👑 Побед: {kills}", reply_markup=get_back("admin_panel"), parse_mode="Markdown")
     
     elif data == "admin_daily" and is_admin(user_id):
-        await query.edit_message_text(f"📈 *Статистика за {datetime.now().strftime('%d.%m.%Y')}*\n\nОбновляется ежедневно", reply_markup=get_back("admin_panel"), parse_mode="Markdown")
+        await query.edit_message_text(f"📈 *Статистика за {datetime.now().strftime('%d.%m.%Y')}*", reply_markup=get_back("admin_panel"), parse_mode="Markdown")
     
     elif data == "admin_list" and is_admin(user_id):
         page = context.user_data.get('admin_page', 0)
@@ -1218,7 +1121,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         info = get_zek_info(target_id)
         if info:
             rank = get_player_rank(target_id)
-            text = f"👤 *Досье*\n\n🆔 ID: {target_id}\n📛 {info['name']}\n📊 Авторитет: {info['respect']} (#{rank})\n⚔️ Заточка: ур.{info['zatochka']}\n🍺 Чифира: {info['chifir']}\n👑 Побед: {info['boss_kills']}\n🐀 Крысят: {info['krysa_count']}\n📈 Опыта: {info['total_xp']}"
+            text = f"👤 *Досье*\n\n🆔 ID: {target_id}\n📛 {info['name']}\n📊 Авторитет: {info['respect']} (#{rank})\n⚔️ Заточка: ур.{info['zatochka']} (+{info['zatochka_damage']})\n🍺 Чифира: {info['chifir']}\n👑 Побед: {info['boss_kills']}\n🐀 Крысят: {info['krysa_count']}\n📈 Опыта: {info['total_xp']}"
             await query.edit_message_text(text, reply_markup=get_player_detail_keyboard(target_id), parse_mode="Markdown")
     
     elif data == "admin_find" and is_admin(user_id):
@@ -1235,7 +1138,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data == "admin_reset_attacks" and is_admin(user_id):
         reset_daily_attacks()
-        await query.edit_message_text("✅ Счётчик атак сброшен для всех игроков!", reply_markup=get_back("admin_panel"))
+        await query.edit_message_text("✅ Счётчик атак сброшен!", reply_markup=get_back("admin_panel"))
     
     elif data == "admin_max_out" and is_admin(user_id):
         conn = sqlite3.connect(DB_NAME)
@@ -1243,12 +1146,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("UPDATE zeks SET respect = 100, zatochka = 100, chifir = 999999, is_admin_hidden = 1 WHERE user_id = ?", (user_id,))
         conn.commit()
         conn.close()
-        await query.edit_message_text("✅ Админ прокачан до максимума!", reply_markup=get_back("admin_panel"))
+        await query.edit_message_text("✅ Админ прокачан!", reply_markup=get_back("admin_panel"))
     
     elif data == "admin_backup" and is_admin(user_id):
         os.makedirs(BACKUP_DIR, exist_ok=True)
         shutil.copy(DB_NAME, f"{BACKUP_DIR}/backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db")
-        await query.edit_message_text("✅ Бэкап базы данных создан!", reply_markup=get_back("admin_panel"))
+        await query.edit_message_text("✅ Бэкап создан!", reply_markup=get_back("admin_panel"))
     
     elif data == "admin_clear_fights" and is_admin(user_id):
         conn = sqlite3.connect(DB_NAME)
@@ -1257,7 +1160,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("DELETE FROM parties")
         conn.commit()
         conn.close()
-        await query.edit_message_text("✅ Все битвы очищены!", reply_markup=get_back("admin_panel"))
+        await query.edit_message_text("✅ Битвы очищены!", reply_markup=get_back("admin_panel"))
     
     elif data.startswith("admin_raise_") and is_admin(user_id):
         target_id = int(data.split("_")[2])
@@ -1269,12 +1172,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("admin_gift_") and is_admin(user_id):
         target_id = int(data.split("_")[2])
         context.user_data['admin_action'] = f'gift_{target_id}'
-        await query.edit_message_text(f"🎁 Введи количество XP для игрока {target_id}:", reply_markup=get_back("admin_list"))
+        await query.edit_message_text(f"🎁 Введи XP для {target_id}:", reply_markup=get_back("admin_list"))
     
     elif data.startswith("admin_gold_") and is_admin(user_id):
         target_id = int(data.split("_")[2])
         context.user_data['admin_action'] = f'gold_{target_id}'
-        await query.edit_message_text(f"💰 Введи количество чифира для игрока {target_id}:", reply_markup=get_back("admin_list"))
+        await query.edit_message_text(f"💰 Введи чифир для {target_id}:", reply_markup=get_back("admin_list"))
     
     elif data.startswith("admin_weapon_") and is_admin(user_id):
         target_id = int(data.split("_")[2])
@@ -1288,7 +1191,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("admin_ban_") and is_admin(user_id):
         target_id = int(data.split("_")[2])
         context.user_data['admin_action'] = f'ban_{target_id}'
-        await query.edit_message_text(f"🚫 Введи часы бана (0 = навсегда):", reply_markup=get_back("admin_list"))
+        await query.edit_message_text(f"🚫 Введи часы бана:", reply_markup=get_back("admin_list"))
     
     elif data.startswith("admin_unban_") and is_admin(user_id):
         target_id = int(data.split("_")[2])
@@ -1320,7 +1223,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
         
         if not result:
-            await update.message.reply_text("❌ Игрок не найден! Попробуй ещё раз.", reply_markup=get_back("gift_start"))
+            await update.message.reply_text("❌ Игрок не найден!", reply_markup=get_back("gift_start"))
             context.user_data['gift_step'] = None
             return
         
@@ -1333,7 +1236,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if send_gift(user_id, target_id, amount):
             await update.message.reply_text(f"✅ Ты подарил {amount}🍺 игроку {target_name}!", reply_markup=get_main_keyboard(user_id))
             try:
-                await context.bot.send_message(target_id, f"🎁 *Подарок!*\n\nИгрок *{name}* подарил тебе {amount}🍺 чифира!\n\nТвой баланс обновлён!", parse_mode="Markdown")
+                await context.bot.send_message(target_id, f"🎁 *Подарок!*\n\nИгрок *{name}* подарил тебе {amount}🍺 чифира!", parse_mode="Markdown")
             except:
                 pass
         else:
@@ -1351,10 +1254,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_feedback(user_id, name, text)
         context.user_data['feedback_step'] = None
         await update.message.reply_text(
-            "✅ *Спасибо за обратную связь!*\n\n"
-            "Твоё сообщение отправлено администратору.\n"
-            "Мы рассмотрим его в ближайшее время.\n\n"
-            "Ты можешь продолжить играть!",
+            "✅ *Спасибо за обратную связь!*\n\nТвоё сообщение отправлено администратору.",
             reply_markup=get_main_keyboard(user_id), parse_mode="Markdown")
         return
     
@@ -1390,7 +1290,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     add_xp(pid[0], xp, "admin")
                     count += 1
                     try:
-                        await context.bot.send_message(pid[0], f"🎁 *Подарок от администрации!*\n\nВсе игроки получили +{xp} опыта!", parse_mode="Markdown")
+                        await context.bot.send_message(pid[0], f"🎁 *Подарок от администрации!* +{xp}XP", parse_mode="Markdown")
                     except:
                         pass
                 await update.message.reply_text(f"✅ {count} игроков получили +{xp}XP!", reply_markup=get_back("admin_panel"))
@@ -1407,7 +1307,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             count = 0
             for pid in players:
                 try:
-                    await context.bot.send_message(pid[0], f"📢 *Рассылка от администрации*\n\n{text}", parse_mode="Markdown")
+                    await context.bot.send_message(pid[0], f"📢 *Рассылка*\n\n{text}", parse_mode="Markdown")
                     count += 1
                 except:
                     pass
@@ -1421,7 +1321,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 add_xp(target_id, xp, "admin")
                 await update.message.reply_text(f"✅ +{xp}XP игроку {target_id}!", reply_markup=get_back("admin_list"))
                 try:
-                    await context.bot.send_message(target_id, f"🎁 *Награда от администрации!*\n\nТы получил +{xp} опыта!", parse_mode="Markdown")
+                    await context.bot.send_message(target_id, f"🎁 *Награда!* +{xp}XP от администрации!", parse_mode="Markdown")
                 except:
                     pass
             except:
@@ -1435,7 +1335,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 add_chifir(target_id, gold)
                 await update.message.reply_text(f"✅ +{gold}🍺 игроку {target_id}!", reply_markup=get_back("admin_list"))
                 try:
-                    await context.bot.send_message(target_id, f"💰 *Награда от администрации!*\n\nТы получил +{gold} чифира!", parse_mode="Markdown")
+                    await context.bot.send_message(target_id, f"💰 *Награда!* +{gold}🍺 от администрации!", parse_mode="Markdown")
                 except:
                     pass
             except:
@@ -1459,7 +1359,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 conn.close()
                 await update.message.reply_text(f"✅ Игрок {target_id} забанен на {ban_text}!", reply_markup=get_back("admin_list"))
                 try:
-                    await context.bot.send_message(target_id, f"🚫 *Вы забанены!*\n\nСрок: {ban_text}\nПо вопросам обращайтесь к администрации.", parse_mode="Markdown")
+                    await context.bot.send_message(target_id, f"🚫 *Вы забанены!*\n\nСрок: {ban_text}", parse_mode="Markdown")
                 except:
                     pass
             except:
@@ -1482,21 +1382,129 @@ async def check_expired_parties(context: ContextTypes.DEFAULT_TYPE):
 def main():
     os.makedirs(BACKUP_DIR, exist_ok=True)
     
-    if os.path.exists(DB_NAME):
-        print("📁 Обнаружена старая БД, выполняю миграцию...")
-        migrate_db()
-    else:
-        print("📁 Создаю новую БД...")
-        init_db()
+    # Инициализация БД
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    
+    # Создание таблиц если их нет
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS zeks (
+            user_id INTEGER PRIMARY KEY,
+            name TEXT,
+            respect INTEGER DEFAULT 1,
+            xp INTEGER DEFAULT 0,
+            total_xp INTEGER DEFAULT 0,
+            zatochka INTEGER DEFAULT 1,
+            chifir INTEGER DEFAULT 50,
+            boss_kills INTEGER DEFAULT 0,
+            krysa_count INTEGER DEFAULT 0,
+            last_krysa TEXT,
+            last_active TEXT,
+            is_banned BOOLEAN DEFAULT 0,
+            ban_until TEXT,
+            is_admin_hidden BOOLEAN DEFAULT 0,
+            created_at TEXT,
+            daily_attacks INTEGER DEFAULT 0
+        )
+    ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS boss_fights (
+            user_id INTEGER,
+            boss_id INTEGER,
+            current_hp INTEGER,
+            last_fight TEXT,
+            party_id INTEGER DEFAULT 0,
+            PRIMARY KEY (user_id, boss_id)
+        )
+    ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS parties (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            boss_id INTEGER,
+            boss_current_hp INTEGER,
+            boss_max_hp INTEGER,
+            members TEXT,
+            leader_id INTEGER,
+            created_at TEXT,
+            expires_at TEXT,
+            is_active BOOLEAN DEFAULT 1
+        )
+    ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS daily_havka (
+            user_id INTEGER PRIMARY KEY,
+            last_claim TEXT,
+            streak INTEGER DEFAULT 0
+        )
+    ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS work_cooldown (
+            user_id INTEGER,
+            work_type TEXT,
+            last_used TEXT,
+            PRIMARY KEY (user_id, work_type)
+        )
+    ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS referrals (
+            user_id INTEGER PRIMARY KEY,
+            referred_by INTEGER,
+            bonus_claimed BOOLEAN DEFAULT 0,
+            referred_at TEXT
+        )
+    ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS attack_cooldown (
+            user_id INTEGER,
+            boss_id INTEGER,
+            last_attack TEXT,
+            PRIMARY KEY (user_id, boss_id)
+        )
+    ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            username TEXT,
+            message TEXT,
+            created_at TEXT,
+            is_read BOOLEAN DEFAULT 0
+        )
+    ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS daily_stats (
+            date TEXT PRIMARY KEY,
+            new_players INTEGER DEFAULT 0,
+            active_players INTEGER DEFAULT 0
+        )
+    ''')
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS gifts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_user INTEGER,
+            to_user INTEGER,
+            amount INTEGER,
+            created_at TEXT
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
     
     app = Application.builder().token(TOKEN).build()
     
     job_queue = app.job_queue
     if job_queue:
         job_queue.run_repeating(check_expired_parties, interval=300, first=10)
-        print("✅ JobQueue запущен")
-    else:
-        print("⚠️ JobQueue не доступен")
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_callback))
